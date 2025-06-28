@@ -1,3 +1,13 @@
+
+type Subaccount = blob;
+
+type Deposit = record {
+  amount: nat64;
+  timestamp: nat64;
+  lock_period_days: nat16;
+};
+
 service : {
-    "greet": (text) -> (text) query;
+  deposit_funds: (Subaccount, nat16, nat64) -> (variant { ok; err: text });
+  get_deposits_by_user: () -> (vec record { Subaccount; Deposit }) query;
 }
