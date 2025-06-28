@@ -1,0 +1,27 @@
+{
+  "canisters": {
+    "stake-pool-backend": {
+      "candid": "src/stake-pool-backend/stake-pool-backend.did",
+      "package": "stake-pool-backend",
+      "type": "rust"
+    },
+    "stake-pool-frontend": {
+      "dependencies": [
+        "stake-pool-backend"
+      ],
+      "source": [
+        "src/stake-pool-frontend/dist"
+      ],
+      "type": "assets",
+      "workspace": "stake-pool-frontend"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
