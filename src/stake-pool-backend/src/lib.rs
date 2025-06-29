@@ -1,4 +1,5 @@
 // src/lib.rs
+mod error;
 use candid::{CandidType, Deserialize, Principal};
 use ic_cdk::api::time;
 use ic_stable_structures::{
@@ -9,6 +10,7 @@ use ic_stable_structures::{
 use ic_ledger_types::Subaccount;
 use std::borrow::Cow;
 use std::cell::RefCell;
+use error::DepositError;
 
 #[derive(CandidType, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct UserKey {
@@ -70,9 +72,9 @@ fn deposit_internal(
     lock_days: u16,
     amount: u64,
     timestamp: u64,
-) -> Result<(), String> {
+) -> Result<(), DepositError> {
     if !VALID_LOCKS.contains(&lock_days) {
-        return Err("Invalid lock period.".into());
+        return Err(DepositError::InvalidLockPeriod);
     }
 
     let key = UserKey {
@@ -93,8 +95,10 @@ fn deposit_internal(
     Ok(())
 }
 
+
+#[candid::candid_method(update)]
 #[ic_cdk::update]
-pub fn deposit_funds(subaccount: Subaccount, lock_days: u16, amount: u64) -> Result<(), String> {
+pub fn deposit_funds(subaccount: Subaccount, lock_days: u16, amount: u64) -> Result<(), DepositError> {
     let caller = ic_cdk::caller();
     let now = time() / 1_000_000_000;
     deposit_internal(caller, subaccount, lock_days, amount, now)
@@ -130,7 +134,7 @@ mod tests {
         let subaccount: Subaccount = Subaccount([1u8; 32]);
         assert_eq!(
             deposit_internal(caller, subaccount, 91, 1_000_000_000, timestamp),
-            Err("Invalid lock period.".to_string())
+            Err(DepositError::InvalidLockPeriod)
         );
 
         assert!(

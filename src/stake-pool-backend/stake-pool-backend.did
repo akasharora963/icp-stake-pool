@@ -1,4 +1,3 @@
-
 type Subaccount = blob;
 
 type Deposit = record {
@@ -7,7 +6,11 @@ type Deposit = record {
   lock_period_days: nat16;
 };
 
+type DepositError = variant {
+  InvalidLockPeriod;
+};
+
 service : {
-  deposit_funds: (Subaccount, nat16, nat64) -> (variant { ok; err: text });
+  deposit_funds: (Subaccount, nat16, nat64) -> (variant { ok : null; err : DepositError });
   get_deposits_by_user: () -> (vec record { Subaccount; Deposit }) query;
-}
+};
