@@ -61,6 +61,9 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
     static DEPOSIT_MAP: RefCell<StableBTreeMap<UserKey, Deposit, Memory>> =
         RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0)))));
+
+    static STAKE_BALANCE_MAP: RefCell<StableBTreeMap<UserKey, u64, Memory>> =
+        RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))));
 }
 
 const VALID_LOCKS: [u16; 3] = [90, 180, 360];
@@ -89,7 +92,14 @@ fn deposit_internal(
     };
 
     DEPOSIT_MAP.with(|map| {
-        map.borrow_mut().insert(key, deposit);
+        map.borrow_mut().insert(key.clone(), deposit);
+    });
+
+    // Update cumulative stake per user subaccount
+    STAKE_BALANCE_MAP.with(|map| {
+        let mut store = map.borrow_mut();
+        let current = store.get(&key).unwrap_or(0);
+        store.insert(key.clone(), current + amount);
     });
 
     Ok(())
@@ -105,6 +115,7 @@ pub fn deposit_funds(subaccount: Subaccount, lock_days: u16, amount: u64) -> Res
 }
 
 #[ic_cdk::query]
+#[candid::candid_method(query)]
 pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
     let caller = ic_cdk::caller();
     DEPOSIT_MAP.with(|map| {
@@ -119,6 +130,14 @@ pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
             })
             .collect()
     })
+}
+
+#[ic_cdk::query]
+#[candid::candid_method(query)]
+pub fn get_stake_balance(subaccount: Subaccount) -> u64 {
+    let principal = ic_cdk::caller();
+    let key = UserKey { principal, subaccount };
+    STAKE_BALANCE_MAP.with(|map| map.borrow().get(&key).unwrap_or(0))
 }
 
 #[cfg(test)]
