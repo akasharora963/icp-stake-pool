@@ -1,19 +1,19 @@
 // src/lib.rs
 use candid::{CandidType, Deserialize, Principal};
 use ic_cdk::api::time;
-//use icrc_ledger_types::icrc1::account::Subaccount;
 use ic_stable_structures::{
-    memory_manager::{MemoryId,MemoryManager, VirtualMemory},
+    memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::{BoundedStorable, Storable},
     DefaultMemoryImpl, StableBTreeMap,
 };
+use ic_ledger_types::Subaccount;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
 #[derive(CandidType, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct UserKey {
     pub principal: Principal,
-    pub subaccount: [u8; 32],
+    pub subaccount: Subaccount,
 }
 
 impl Storable for UserKey {
@@ -66,24 +66,18 @@ const VALID_LOCKS: [u16; 3] = [90, 180, 360];
 // Internal reusable logic for testing or canister
 fn deposit_internal(
     principal: Principal,
-    subaccount: Vec<u8>,
+    subaccount: Subaccount,
     lock_days: u16,
     amount: u64,
     timestamp: u64,
 ) -> Result<(), String> {
-    if subaccount.len() != 32 {
-        return Err("Subaccount must be exactly 32 bytes.".into());
-    }
     if !VALID_LOCKS.contains(&lock_days) {
         return Err("Invalid lock period.".into());
     }
 
-    let mut fixed = [0u8; 32];
-    fixed.copy_from_slice(&subaccount);
-
     let key = UserKey {
         principal,
-        subaccount: fixed,
+        subaccount,
     };
 
     let deposit = Deposit {
@@ -100,20 +94,21 @@ fn deposit_internal(
 }
 
 #[ic_cdk::update]
-pub fn deposit_funds(subaccount: Vec<u8>, lock_days: u16, amount: u64) -> Result<(), String> {
+pub fn deposit_funds(subaccount: Subaccount, lock_days: u16, amount: u64) -> Result<(), String> {
     let caller = ic_cdk::caller();
     let now = time() / 1_000_000_000;
     deposit_internal(caller, subaccount, lock_days, amount, now)
 }
 
 #[ic_cdk::query]
-pub fn get_deposits_by_user(caller:Principal) -> Vec<(Vec<u8>, Deposit)> {
+pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
+    let caller = ic_cdk::caller();
     DEPOSIT_MAP.with(|map| {
         map.borrow()
             .iter()
             .filter_map(|(key, deposit)| {
                 if key.principal == caller {
-                    Some((key.subaccount.to_vec(), deposit))
+                    Some((key.subaccount, deposit))
                 } else {
                     None
                 }
@@ -124,6 +119,7 @@ pub fn get_deposits_by_user(caller:Principal) -> Vec<(Vec<u8>, Deposit)> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -131,25 +127,15 @@ mod tests {
         let caller = Principal::anonymous();
         let timestamp = 0;
 
-        let subaccount = vec![1u8; 32];
+        let subaccount: Subaccount = Subaccount([1u8; 32]);
         assert_eq!(
-            deposit_internal(caller, subaccount.clone(), 91, 1_000_000_000, timestamp),
+            deposit_internal(caller, subaccount, 91, 1_000_000_000, timestamp),
             Err("Invalid lock period.".to_string())
         );
 
         assert!(
-            deposit_internal(caller, subaccount.clone(), 90, 1_000_000_000, timestamp)
-                .is_ok()
+            deposit_internal(caller, subaccount, 90, 1_000_000_000, timestamp).is_ok()
         );
     }
 
-    #[test]
-    fn test_get_deposits_by_user() {
-        let caller = Principal::anonymous();
-        let timestamp = 0;        
-        let subaccount = vec![1u8; 32]; 
-
-        deposit_internal(caller, subaccount.clone(), 90, 1_000_000_000, timestamp).unwrap();
-        assert_eq!(get_deposits_by_user(caller).len(), 1);
-    }
 }
