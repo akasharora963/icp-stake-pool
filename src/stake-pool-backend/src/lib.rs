@@ -1,16 +1,16 @@
 // src/lib.rs
 mod error;
 use candid::{CandidType, Deserialize, Principal};
+use error::DepositError;
 use ic_cdk::api::time;
+use ic_ledger_types::Subaccount;
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::{BoundedStorable, Storable},
     DefaultMemoryImpl, StableBTreeMap,
 };
-use ic_ledger_types::Subaccount;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use error::DepositError;
 
 #[derive(CandidType, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct UserKey {
@@ -33,7 +33,7 @@ impl BoundedStorable for UserKey {
     const IS_FIXED_SIZE: bool = false;
 }
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
 pub struct Deposit {
     pub id: u64,
     pub amount: u64,
@@ -68,7 +68,7 @@ thread_local! {
 
     static STAKE_BALANCE_MAP: RefCell<StableBTreeMap<UserKey, u64, Memory>> =
         RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))));
-    
+
     static DEPOSIT_ID_COUNTER: RefCell<u64> = RefCell::new(0);
 }
 
@@ -81,7 +81,7 @@ fn deposit_internal(
     lock_days: u16,
     amount: u64,
     timestamp: u64,
-) -> Result<(), DepositError> {
+) -> Result<Deposit, DepositError> {
     if !VALID_LOCKS.contains(&lock_days) {
         return Err(DepositError::InvalidLockPeriod);
     }
@@ -107,7 +107,7 @@ fn deposit_internal(
     DEPOSIT_MAP.with(|map| {
         let mut m = map.borrow_mut();
         let mut deposits = m.get(&key).unwrap_or(DepositList(vec![]));
-        deposits.0.push(deposit);
+        deposits.0.push(deposit.clone());
         m.insert(key.clone(), deposits);
     });
 
@@ -118,67 +118,77 @@ fn deposit_internal(
         store.insert(key.clone(), current + amount);
     });
 
-    Ok(())
+    Ok(deposit)
 }
 
+fn withdraw_internal(
+    principal: Principal,
+    subaccount: Subaccount,
+    deposit_id: u64,
+    now: u64,
+) -> Result<u64, DepositError> {
+    let user_key = UserKey {
+        principal,
+        subaccount,
+    };
+
+    // Get deposits list
+    let deposit_list_opt = DEPOSIT_MAP.with(|map| map.borrow().get(&user_key));
+
+    // Validate deposit exists
+    let mut deposit_list = match deposit_list_opt {
+        Some(list) => list,
+        None => return Err(DepositError::NoDepositFound),
+    };
+
+    // Find the deposit by ID
+    let position = deposit_list.0.iter().position(|d| d.id == deposit_id);
+    let deposit = match position {
+        Some(pos) => &deposit_list.0[pos],
+        None => return Err(DepositError::NoDepositFound),
+    };
+
+    // Check lock expiry
+    let unlock_time = deposit.timestamp + (deposit.lock_period_days as u64 * 86400);
+    if now < unlock_time {
+        return Err(DepositError::LockPeriodNotExpired);
+    }
+
+    // Remove deposit and update state
+    let withdrawn = deposit_list.0.remove(position.unwrap());
+
+    DEPOSIT_MAP.with(|map| {
+        map.borrow_mut().insert(user_key.clone(), deposit_list);
+    });
+
+    STAKE_BALANCE_MAP.with(|map| {
+        let mut m = map.borrow_mut();
+        let current = m.get(&user_key).unwrap_or(0);
+        m.insert(user_key.clone(), current.saturating_sub(withdrawn.amount));
+    });
+
+    Ok(withdrawn.amount)
+}
 
 #[candid::candid_method(update)]
 #[ic_cdk::update]
-pub fn deposit_funds(subaccount: Subaccount, lock_days: u16, amount: u64) -> Result<(), DepositError> {
+pub fn deposit_funds(
+    subaccount: Subaccount,
+    lock_days: u16,
+    amount: u64,
+) -> Result<Deposit, DepositError> {
     let caller = ic_cdk::caller();
     let now = time() / 1_000_000_000;
     deposit_internal(caller, subaccount, lock_days, amount, now)
 }
 
-
-
 #[ic_cdk::update]
 #[candid::candid_method(update)]
 pub fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u64, DepositError> {
-    let caller = ic_cdk::caller();
+    let principal = ic_cdk::caller();
     let now = time() / 1_000_000_000;
-
-    let user_key = UserKey { principal: caller, subaccount: subaccount };
-
-    let mut found = None;
-
-    DEPOSIT_MAP.with(|map| {
-        let mut store = map.borrow_mut();
-        if let Some(mut list) = store.get(&user_key) {
-            if let Some(pos) = list.0.iter().position(|d| d.id == deposit_id) {
-                found = Some(list.0.remove(pos));
-                store.insert(user_key.clone(), list); // re-insert updated list
-            }
-        }
-    });
-    
-
-    match found {
-        Some(d) => {
-            let unlock_time = d.timestamp + (d.lock_period_days as u64 * 86400);
-            if now < unlock_time {
-                // Reinsert if lock not expired
-                DEPOSIT_MAP.with(|map| {
-                    let mut list = map.borrow().get(&user_key).unwrap_or_else(|| DepositList(vec![]));
-                    list.0.push(d.clone());
-                    map.borrow_mut().insert(user_key.clone(), list);
-                });
-                return Err(DepositError::LockPeriodNotExpired);
-            }
-
-            STAKE_BALANCE_MAP.with(|map| {
-                let mut m = map.borrow_mut();
-                let current = m.get(&user_key).unwrap_or(0);
-                m.insert(user_key.clone(), current.saturating_sub(d.amount));
-            });
-
-            Ok(d.amount)
-        }
-        None => Err(DepositError::NoDepositFound),
-    }
+    withdraw_internal(principal, subaccount, deposit_id, now)
 }
-
-
 
 #[ic_cdk::query]
 #[candid::candid_method(query)]
@@ -187,12 +197,7 @@ pub fn get_deposits_by_user(caller: Principal) -> Vec<(Subaccount, Deposit)> {
         map.borrow()
             .iter()
             .filter(|(key, _)| key.principal == caller)
-            .flat_map(|(key, list)| {
-                list.clone()
-                    .0
-                    .into_iter()
-                    .map(move |d| (key.subaccount, d))
-            })
+            .flat_map(|(key, list)| list.clone().0.into_iter().map(move |d| (key.subaccount, d)))
             .collect()
     })
 }
@@ -201,7 +206,10 @@ pub fn get_deposits_by_user(caller: Principal) -> Vec<(Subaccount, Deposit)> {
 #[candid::candid_method(query)]
 pub fn get_stake_balance(subaccount: Subaccount) -> u64 {
     let principal = ic_cdk::caller();
-    let key = UserKey { principal, subaccount };
+    let key = UserKey {
+        principal,
+        subaccount,
+    };
     STAKE_BALANCE_MAP.with(|map| map.borrow().get(&key).unwrap_or(0))
 }
 
@@ -213,17 +221,76 @@ mod tests {
     #[test]
     fn test_deposit_validation() {
         let caller = Principal::anonymous();
-        let timestamp = 0;
-
+        let current_time = 1_000_000_000;
+        let timestamp = current_time - (100 * 86400); // 100 days ago
         let subaccount: Subaccount = Subaccount([1u8; 32]);
         assert_eq!(
             deposit_internal(caller, subaccount, 91, 1_000_000_000, timestamp),
             Err(DepositError::InvalidLockPeriod)
         );
 
-        assert!(
-            deposit_internal(caller, subaccount, 90, 1_000_000_000, timestamp).is_ok()
-        );
+        let deposit1 = deposit_internal(caller, subaccount, 90, 1_000_000_000, timestamp).unwrap();
+        assert_eq!(deposit1.id, 1);
+
+
+        // double deposit with different lock period
+        let deposit2 = deposit_internal(caller, subaccount, 180, 1_000_000_000, timestamp).unwrap();
+
+        assert_eq!(deposit2.id, 2);
+
     }
 
+    #[test]
+    fn test_withdraw_funds_success() {
+        let principal = Principal::anonymous();
+        let sub = Subaccount([2u8; 32]);
+
+        let current_time = 1_000_000_000;
+        let timestamp = current_time - (100 * 86400); // 100 days ago
+
+        let deposit = deposit_internal(principal, sub.clone(), 90, 1_000_000, timestamp).unwrap();
+        assert_eq!(deposit.id, 1);
+
+
+        let result = withdraw_internal(principal, sub, deposit.id, current_time);
+
+        assert_eq!(result, Ok(1_000_000));
+    }
+
+    #[test]
+    fn test_withdraw_funds_lock_not_expired() {
+        let principal = Principal::anonymous();
+        let sub = Subaccount([3u8; 32]);
+
+        let current_time = 1_000_000_000; // Mocked current time (in seconds)
+
+        // Deposit just now, lock not expired
+        let deposit =
+            deposit_internal(principal, sub.clone(), 90, 2_000_000, current_time).unwrap();
+
+            assert_eq!(deposit.id, 1);
+        
+
+        let result = withdraw_internal(principal, sub, deposit.id, current_time);
+
+        assert_eq!(result, Err(DepositError::LockPeriodNotExpired));
+    }
+
+    #[test]
+    fn test_withdraw_funds_invalid_deposit_id() {
+        let principal = Principal::anonymous();
+        let sub = Subaccount([4u8; 32]);
+
+        let current_time = 1_000_000_000;
+        let timestamp = current_time - (100 * 86400); // 100 days ago
+        let invalid_id = 999;
+
+        let deposit = deposit_internal(principal, sub.clone(), 90, 3_000_000, timestamp).unwrap();
+
+        assert_eq!(deposit.id, 1);
+
+        let result = withdraw_internal(principal, sub, invalid_id, timestamp);
+
+        assert_eq!(result, Err(DepositError::NoDepositFound));
+    }
 }
