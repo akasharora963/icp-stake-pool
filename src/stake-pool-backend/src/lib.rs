@@ -4,6 +4,10 @@ use candid::{CandidType, Deserialize, Principal};
 use error::DepositError;
 use ic_cdk::api::time;
 use ic_ledger_types::Subaccount;
+use icrc_ledger_types::icrc1::{account::Account, transfer::TransferError};
+use icrc_ledger_types::icrc1::transfer::TransferArg;
+use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
+use ic_cdk::call;
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::{BoundedStorable, Storable},
@@ -121,7 +125,7 @@ fn deposit_internal(
     Ok(deposit)
 }
 
-fn withdraw_internal(
+ fn withdraw_internal(
     principal: Principal,
     subaccount: Subaccount,
     deposit_id: u64,
@@ -172,27 +176,84 @@ fn withdraw_internal(
 
 #[candid::candid_method(update)]
 #[ic_cdk::update]
-pub fn deposit_funds(
+pub async  fn deposit_funds(
     subaccount: Subaccount,
     lock_days: u16,
     amount: u64,
 ) -> Result<Deposit, DepositError> {
     let caller = ic_cdk::caller();
     let now = time() / 1_000_000_000;
+     // Step 1: Pull tokens from user's subaccount
+     let from_account = Account {
+        owner: caller,
+        subaccount: Some(subaccount.0),
+    };
+
+    let to_account = Account {
+        owner: ic_cdk::id(),
+        subaccount: None,
+    };
+
+    let transfer_args = TransferFromArgs {
+        from: from_account,
+        to: to_account,
+        amount: amount.into(),
+        spender_subaccount: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let (res,): (Result<u64, String>,) = call(
+        Principal::from_text("icrc2_ledger").unwrap(), // need to check ledger id and replace it
+        "icrc2_transfer_from",
+        (transfer_args,)
+    )
+    .await
+    .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+    res.map_err(DepositError::LedgerTransferFailed)?;
     deposit_internal(caller, subaccount, lock_days, amount, now)
 }
 
 #[ic_cdk::update]
 #[candid::candid_method(update)]
-pub fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u64, DepositError> {
+pub async fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u64, DepositError> {
     let principal = ic_cdk::caller();
     let now = time() / 1_000_000_000;
-    withdraw_internal(principal, subaccount, deposit_id, now)
+    let withdrawn_amount = withdraw_internal(principal, subaccount, deposit_id, now)?;
+     // Transfer funds back to user
+     let to_account = Account {
+        owner: principal,
+        subaccount: Some(subaccount.0),
+    };
+
+    let transfer_arg = TransferArg {
+        to: to_account,
+        amount: withdrawn_amount.into(),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+        from_subaccount: None,
+    };
+
+    let (transfer_res,): (Result<u64, TransferError>,) = call(
+        Principal::from_text("icrc2_ledger").unwrap(), // need to check ledger id and replace it
+        "icrc1_transfer",
+        (transfer_arg,)
+    )
+    .await
+    .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+    transfer_res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+     Ok(withdrawn_amount)
 }
 
 #[ic_cdk::query]
 #[candid::candid_method(query)]
-pub fn get_deposits_by_user(caller: Principal) -> Vec<(Subaccount, Deposit)> {
+pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
+    let caller = ic_cdk::caller();
+    
     DEPOSIT_MAP.with(|map| {
         map.borrow()
             .iter()

@@ -5,4 +5,5 @@ pub enum DepositError {
     InvalidLockPeriod,
     LockPeriodNotExpired,
     NoDepositFound,
+    LedgerTransferFailed(String),
 }
