@@ -174,6 +174,83 @@ fn withdraw_internal(
     Ok(withdrawn.amount)
 }
 
+async fn reward_pool_internal(caller: Principal, amount: u64) -> Result<bool, DepositError> {
+    // 1. Transfer full reward from caller to canister
+    let from = Account {
+        owner: caller,
+        subaccount: None,
+    };
+    let to = Account {
+        owner: ic_cdk::id(),// need to check ledger id and replace it
+        subaccount: None,
+    };
+
+    let transfer_args = TransferFromArgs {
+        from,
+        to,
+        amount: amount.into(),
+        spender_subaccount: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let (res,): (Result<u64, String>,) = call(
+        Principal::from_text("icrc2_ledger").unwrap(),
+        "icrc2_transfer_from",
+        (transfer_args,),
+    )
+    .await
+    .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+    res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+    // 2. Total stake amount
+    let total_stake: u128 =
+        STAKE_BALANCE_MAP.with(|map| map.borrow().iter().map(|(_, s)| s as u128).sum());
+
+    if total_stake == 0 {
+        return Err(DepositError::NoStakerFound);
+    }
+
+    // 3. Sequentially transfer proportional reward to each staker
+    let stake_data: Vec<(UserKey, u64)> =
+        STAKE_BALANCE_MAP.with(|map| map.borrow().iter().map(|(k, v)| (k.clone(), v)).collect());
+
+    for (key, stake) in stake_data {
+        let reward = (stake as u128 * amount as u128) / total_stake;
+        if reward == 0 {
+            continue;
+        }
+
+        let to_account = Account {
+            owner: key.principal,
+            subaccount: Some(key.subaccount.0),
+        };
+
+        let transfer_arg = TransferArg {
+            to: to_account,
+            amount: (reward as u64).into(),
+            fee: None,
+            memo: None,
+            from_subaccount: None,
+            created_at_time: None,
+        };
+
+        let (res,): (Result<u64, String>,) = call(
+            Principal::from_text("icrc2_ledger").unwrap(),
+            "icrc1_transfer",
+            (transfer_arg,),
+        )
+        .await
+        .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+        res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+    }
+
+    Ok(true)
+}
+
 #[candid::candid_method(update)]
 #[ic_cdk::update]
 pub async fn deposit_funds(
@@ -249,95 +326,6 @@ pub async fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u
     Ok(withdrawn_amount)
 }
 
-fn get_canister_id() -> Principal {
-    #[cfg(not(test))]
-    {
-        ic_cdk::id()
-    }
-
-    #[cfg(test)]
-    {
-        // Replace with a dummy test principal
-        Principal::from_text("r7inp-6aaaa-aaaaa-aaabq-cai").unwrap()
-    }
-}
-
-async fn reward_pool_internal(caller: Principal, amount: u64) -> Result<bool, DepositError> {
-    // 1. Transfer full reward from caller to canister
-    let from = Account {
-        owner: caller,
-        subaccount: None,
-    };
-    let to = Account {
-        owner: get_canister_id(),
-        subaccount: None,
-    };
-
-    let transfer_args = TransferFromArgs {
-        from,
-        to,
-        amount: amount.into(),
-        spender_subaccount: None,
-        fee: None,
-        memo: None,
-        created_at_time: None,
-    };
-
-    // let (res,): (Result<u64, String>,) = call(
-    //     Principal::from_text("icrc2_ledger").unwrap(),
-    //     "icrc2_transfer_from",
-    //     (transfer_args,),
-    // )
-    // .await
-    // .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
-
-    // res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
-
-    // 2. Total stake amount
-    let total_stake: u128 =
-        STAKE_BALANCE_MAP.with(|map| map.borrow().iter().map(|(_, s)| s as u128).sum());
-
-    if total_stake == 0 {
-        return Err(DepositError::NoStakerFound);
-    }
-
-    // 3. Sequentially transfer proportional reward to each staker
-    let stake_data: Vec<(UserKey, u64)> =
-        STAKE_BALANCE_MAP.with(|map| map.borrow().iter().map(|(k, v)| (k.clone(), v)).collect());
-
-    for (key, stake) in stake_data {
-        let reward = (stake as u128 * amount as u128) / total_stake;
-        if reward == 0 {
-            continue;
-        }
-
-        let to_account = Account {
-            owner: key.principal,
-            subaccount: Some(key.subaccount.0),
-        };
-
-        let transfer_arg = TransferArg {
-            to: to_account,
-            amount: (reward as u64).into(),
-            fee: None,
-            memo: None,
-            from_subaccount: None,
-            created_at_time: None,
-        };
-
-        // let (res,): (Result<u64, String>,) = call(
-        //     Principal::from_text("icrc2_ledger").unwrap(),
-        //     "icrc1_transfer",
-        //     (transfer_arg,),
-        // )
-        // .await
-        // .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
-
-        // res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
-    }
-
-    Ok(true)
-}
 
 #[ic_cdk::update]
 #[candid::candid_method(update)]
