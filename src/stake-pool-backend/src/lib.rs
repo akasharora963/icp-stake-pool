@@ -78,6 +78,7 @@ thread_local! {
 
 const VALID_LOCKS: [u16; 3] = [90, 180, 360];
 
+
 // Internal reusable logic for testing or canister
 fn deposit_internal(
     principal: Principal,
@@ -334,6 +335,59 @@ pub async fn reward_pool(amount: u64) -> Result<bool, DepositError> {
     let result = reward_pool_internal(caller, amount).await;
     result
 }
+
+#[ic_cdk::update]
+#[candid::candid_method(update)]
+pub async fn slash_pool(amount: u64, receiver: Principal) -> Result<bool, DepositError> {
+    let total_stake: u128 = STAKE_BALANCE_MAP.with(|map| {
+        map.borrow().iter().map(|(_, s)| s as u128).sum()
+    });
+
+    if total_stake == 0 {
+        return Err(DepositError::NoDepositFound);
+    }
+
+    let stake_data: Vec<(UserKey, u64)> = STAKE_BALANCE_MAP.with(|map| {
+        map.borrow().iter().map(|(k, v)| (k.clone(), v)).collect()
+    });
+
+    STAKE_BALANCE_MAP.with(|map| {
+        let mut store = map.borrow_mut();
+        for (key, stake) in &stake_data {
+            let slash_amt = (*stake as u128 * amount as u128) / total_stake;
+            let current = *stake;
+            let updated = current.saturating_sub(slash_amt as u64);
+            store.insert(key.clone(), updated);
+        }
+    });
+
+    let receiver_account = Account {
+        owner: receiver,
+        subaccount: None,
+    };
+
+    let transfer_arg = icrc_ledger_types::icrc1::transfer::TransferArg {
+        to: receiver_account,
+        amount: amount.into(), 
+        fee: None,
+        memo: None,
+        from_subaccount: None,
+        created_at_time: None,
+    };
+
+    let (res,): (Result<u64, String>,) = call(
+        Principal::from_text("icrc2_ledger").unwrap(),
+        "icrc1_transfer",
+        (transfer_arg,)
+    )
+    .await
+    .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+    res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
+
+    Ok(true)
+}
+
 
 #[ic_cdk::query]
 #[candid::candid_method(query)]
