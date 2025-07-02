@@ -251,7 +251,7 @@ pub async fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u
 
 #[ic_cdk::update]
 #[candid::candid_method(update)]
-pub async fn reward_pool(amount: u64) -> Result<(), String> {
+pub async fn reward_pool(amount: u64) -> Result<bool, DepositError> {
     let caller = ic_cdk::caller();
 
     // 1. Transfer full reward from caller to canister
@@ -280,9 +280,9 @@ pub async fn reward_pool(amount: u64) -> Result<(), String> {
         (transfer_args,)
     )
     .await
-    .map_err(|e| format!("TransferFrom call failed: {:?}", e))?;
+    .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
 
-    res.map_err(|e| format!("TransferFrom error: {:?}", e))?;
+    res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
 
     // 2. Total stake amount
     let total_stake: u128 = STAKE_BALANCE_MAP.with(|map| {
@@ -290,7 +290,7 @@ pub async fn reward_pool(amount: u64) -> Result<(), String> {
     });
 
     if total_stake == 0 {
-        return Err("No stakers to reward.".into());
+        return Err(DepositError::NoStakerFound);
     }
 
     // 3. Sequentially transfer proportional reward to each staker
@@ -324,12 +324,12 @@ pub async fn reward_pool(amount: u64) -> Result<(), String> {
             (transfer_arg,)
         )
         .await
-        .map_err(|e| format!("Reward transfer failed: {:?}", e))?;
+        .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
 
-        res.map_err(|e| format!("Reward ledger error: {:?}", e))?;
+        res.map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 
