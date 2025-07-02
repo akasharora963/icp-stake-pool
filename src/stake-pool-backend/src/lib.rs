@@ -249,6 +249,90 @@ pub async fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u
      Ok(withdrawn_amount)
 }
 
+#[ic_cdk::update]
+#[candid::candid_method(update)]
+pub async fn reward_pool(amount: u64) -> Result<(), String> {
+    let caller = ic_cdk::caller();
+
+    // 1. Transfer full reward from caller to canister
+    let from = Account {
+        owner: caller,
+        subaccount: None,
+    };
+    let to = Account {
+        owner: ic_cdk::id(),
+        subaccount: None,
+    };
+
+    let transfer_args = TransferFromArgs {
+        from,
+        to,
+        amount: amount.into(),
+        spender_subaccount: None,
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+
+    let (res,): (Result<u64, String>,) = call(
+        Principal::from_text("icrc2_ledger").unwrap(),
+        "icrc2_transfer_from",
+        (transfer_args,)
+    )
+    .await
+    .map_err(|e| format!("TransferFrom call failed: {:?}", e))?;
+
+    res.map_err(|e| format!("TransferFrom error: {:?}", e))?;
+
+    // 2. Total stake amount
+    let total_stake: u128 = STAKE_BALANCE_MAP.with(|map| {
+        map.borrow().iter().map(|(_, s)| s as u128).sum()
+    });
+
+    if total_stake == 0 {
+        return Err("No stakers to reward.".into());
+    }
+
+    // 3. Sequentially transfer proportional reward to each staker
+    let stake_data: Vec<(UserKey, u64)> = STAKE_BALANCE_MAP.with(|map| {
+        map.borrow().iter().map(|(k, v)| (k.clone(), v)).collect()
+    });
+
+    for (key, stake) in stake_data {
+        let reward = (stake as u128 * amount as u128) / total_stake;
+        if reward == 0 {
+            continue;
+        }
+
+        let to_account = Account {
+            owner: key.principal,
+            subaccount: Some(key.subaccount.0),
+        };
+
+        let transfer_arg = icrc_ledger_types::icrc1::transfer::TransferArg {
+            to: to_account,
+            amount: (reward as u64).into(),
+            fee: None,
+            memo: None,
+            from_subaccount: None,
+            created_at_time: None,
+        };
+
+        let (res,): (Result<u64, String>,) = call(
+            Principal::from_text("icrc2_ledger").unwrap(),
+            "icrc1_transfer",
+            (transfer_arg,)
+        )
+        .await
+        .map_err(|e| format!("Reward transfer failed: {:?}", e))?;
+
+        res.map_err(|e| format!("Reward ledger error: {:?}", e))?;
+    }
+
+    Ok(())
+}
+
+
 #[ic_cdk::query]
 #[candid::candid_method(query)]
 pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
