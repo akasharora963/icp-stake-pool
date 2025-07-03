@@ -137,7 +137,7 @@ dfx canister call staking_pool slash_pool '(200000, record { principal = "<recei
 
 ---
 
-## 🧾 Future Enhancements
+## 🧾 To Do
 - [] Testing of reward pool and slash pool
 ---
 
