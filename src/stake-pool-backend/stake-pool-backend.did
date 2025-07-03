@@ -16,6 +16,7 @@ type DepositError = variant {
 service : {
   deposit_funds: (Subaccount, nat16, nat64) -> (variant { ok : Deposit; err : DepositError });
   withdraw_funds: (Subaccount,nat64) -> (variant {ok: nat64;err:DepositError});
+  reward_pool: (nat64) -> (variant {ok: bool; err: DepositError});
   get_deposits_by_user: () -> (vec record { Subaccount; Deposit }) query;
   get_stake_balance: (Subaccount) -> (nat64) query;
 };

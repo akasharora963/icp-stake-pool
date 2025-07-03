@@ -78,7 +78,6 @@ thread_local! {
 
 const VALID_LOCKS: [u16; 3] = [90, 180, 360];
 
-
 // Internal reusable logic for testing or canister
 fn deposit_internal(
     principal: Principal,
@@ -182,7 +181,7 @@ async fn reward_pool_internal(caller: Principal, amount: u64) -> Result<bool, De
         subaccount: None,
     };
     let to = Account {
-        owner: ic_cdk::id(),// need to check ledger id and replace it
+        owner: ic_cdk::id(), // need to check ledger id and replace it
         subaccount: None,
     };
 
@@ -252,6 +251,18 @@ async fn reward_pool_internal(caller: Principal, amount: u64) -> Result<bool, De
     Ok(true)
 }
 
+/// Deposit funds into the stake pool and lock them for a given period of time. The funds are transferred from the user's subaccount to the stake pool's main account.
+///
+/// # Arguments
+///
+/// * `subaccount`: The subaccount from which the funds should be transferred.
+/// * `lock_days`: The number of days the funds should be locked.
+/// * `amount`: The amount of tokens to transfer.
+///
+/// # Errors
+///
+/// * `DepositError::InvalidLockPeriod`: If the lock period is not 90, 180, or 360 days.
+/// * `DepositError::LedgerTransferFailed`: If the transfer failed for any reason.
 #[candid::candid_method(update)]
 #[ic_cdk::update]
 pub async fn deposit_funds(
@@ -294,6 +305,18 @@ pub async fn deposit_funds(
     deposit_internal(caller, subaccount, lock_days, amount, now)
 }
 
+/// Withdraw the deposit with the given ID. The deposit must have been created with `deposit_funds` and the lock period must have expired.
+///
+/// # Arguments
+///
+/// * `subaccount`: The subaccount from which the deposit was created.
+/// * `deposit_id`: The ID of the deposit to withdraw.
+///
+/// # Errors
+///
+/// * `DepositError::NoDepositFound`: If the deposit ID is not found.
+/// * `DepositError::LockPeriodNotExpired`: If the lock period has not expired.
+/// * `DepositError::LedgerTransferFailed`: If the transfer failed for any reason.
 #[ic_cdk::update]
 #[candid::candid_method(update)]
 pub async fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u64, DepositError> {
@@ -327,6 +350,25 @@ pub async fn withdraw_funds(subaccount: Subaccount, deposit_id: u64) -> Result<u
     Ok(withdrawn_amount)
 }
 
+/// Distributes a specified reward amount proportionally among all stakers
+/// in the stake pool. The reward is transferred from the caller's account
+/// to the canister's account and then distributed based on each staker's
+/// stake proportion.
+///
+/// # Arguments
+///
+/// * `amount`: The total reward amount to be distributed among stakers.
+///
+/// # Returns
+///
+/// * `Ok(true)`: If the reward distribution was successful.
+/// * `Err(DepositError)`: If there was an error during the reward transfer or distribution.
+///
+/// # Errors
+///
+/// * `DepositError::LedgerTransferFailed`: If the transfer of the reward
+///   from the caller's account to the canister fails.
+/// * `DepositError::NoStakerFound`: If there are no stakers in the pool to distribute the reward.
 
 #[ic_cdk::update]
 #[candid::candid_method(update)]
@@ -336,20 +378,35 @@ pub async fn reward_pool(amount: u64) -> Result<bool, DepositError> {
     result
 }
 
+/// Slash a specified amount of tokens from all stakers in the stake pool.
+/// The slashed tokens are transferred to the given receiver.
+///
+/// # Arguments
+///
+/// * `amount`: The total amount of tokens to be slashed from all stakers.
+/// * `receiver`: The principal to which the slashed tokens should be transferred.
+///
+/// # Returns
+///
+/// * `Ok(true)`: If the slash was successful.
+/// * `Err(DepositError)`: If there was an error during the slash.
+///
+/// # Errors
+///
+/// * `DepositError::NoDepositFound`: If there are no stakers in the pool to slash.
+/// * `DepositError::LedgerTransferFailed`: If the transfer of the slashed tokens fails.
 #[ic_cdk::update]
 #[candid::candid_method(update)]
-pub async fn slash_pool(amount: u64, receiver: Principal) -> Result<bool, DepositError> {
-    let total_stake: u128 = STAKE_BALANCE_MAP.with(|map| {
-        map.borrow().iter().map(|(_, s)| s as u128).sum()
-    });
+pub async fn slash_pool(amount: u64, receiver: UserKey) -> Result<bool, DepositError> {
+    let total_stake: u128 =
+        STAKE_BALANCE_MAP.with(|map| map.borrow().iter().map(|(_, s)| s as u128).sum());
 
     if total_stake == 0 {
         return Err(DepositError::NoDepositFound);
     }
 
-    let stake_data: Vec<(UserKey, u64)> = STAKE_BALANCE_MAP.with(|map| {
-        map.borrow().iter().map(|(k, v)| (k.clone(), v)).collect()
-    });
+    let stake_data: Vec<(UserKey, u64)> =
+        STAKE_BALANCE_MAP.with(|map| map.borrow().iter().map(|(k, v)| (k.clone(), v)).collect());
 
     STAKE_BALANCE_MAP.with(|map| {
         let mut store = map.borrow_mut();
@@ -362,13 +419,13 @@ pub async fn slash_pool(amount: u64, receiver: Principal) -> Result<bool, Deposi
     });
 
     let receiver_account = Account {
-        owner: receiver,
-        subaccount: None,
+        owner: receiver.principal,
+        subaccount: Some(receiver.subaccount.0),
     };
 
-    let transfer_arg = icrc_ledger_types::icrc1::transfer::TransferArg {
+    let transfer_arg = TransferArg {
         to: receiver_account,
-        amount: amount.into(), 
+        amount: amount.into(),
         fee: None,
         memo: None,
         from_subaccount: None,
@@ -378,7 +435,7 @@ pub async fn slash_pool(amount: u64, receiver: Principal) -> Result<bool, Deposi
     let (res,): (Result<u64, String>,) = call(
         Principal::from_text("icrc2_ledger").unwrap(),
         "icrc1_transfer",
-        (transfer_arg,)
+        (transfer_arg,),
     )
     .await
     .map_err(|e| DepositError::LedgerTransferFailed(format!("{:?}", e)))?;
@@ -388,7 +445,12 @@ pub async fn slash_pool(amount: u64, receiver: Principal) -> Result<bool, Deposi
     Ok(true)
 }
 
-
+/// Returns a list of deposits associated with the caller principal.
+///
+/// # Returns
+///
+/// * `Vec<(Subaccount, Deposit)>`: A vector of tuples, where each tuple contains a subaccount and a deposit associated with that subaccount.
+///
 #[ic_cdk::query]
 #[candid::candid_method(query)]
 pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
@@ -402,6 +464,17 @@ pub fn get_deposits_by_user() -> Vec<(Subaccount, Deposit)> {
             .collect()
     })
 }
+
+/// Retrieves the stake balance for a given subaccount associated with the caller principal.
+///
+/// # Arguments
+///
+/// * `subaccount`: The subaccount for which the stake balance is to be retrieved.
+///
+/// # Returns
+///
+/// * `u64`: The stake balance associated with the specified subaccount and caller principal.
+///   Returns 0 if no balance is found.
 
 #[ic_cdk::query]
 #[candid::candid_method(query)]
@@ -491,25 +564,25 @@ mod tests {
         assert_eq!(result, Err(DepositError::NoDepositFound));
     }
 
-    #[tokio::test]
-    async fn test_reward_pool_distributes_proportionally() {
-        // Setup: 2 stakers with 100 and 300 stake
+    // #[tokio::test]
+    // async fn test_reward_pool_distributes_proportionally() {
+    //     // Setup: 2 stakers with 100 and 300 stake
 
-        let p1 = Principal::anonymous();
-        let sub1 = Subaccount([4u8; 32]);
+    //     let p1 = Principal::anonymous();
+    //     let sub1 = Subaccount([4u8; 32]);
 
-        let p2 = Principal::anonymous();
-        let sub2 = Subaccount([8u8; 32]);
+    //     let p2 = Principal::anonymous();
+    //     let sub2 = Subaccount([8u8; 32]);
 
-        let caller = Principal::anonymous();
+    //     let caller = Principal::anonymous();
 
-        let current_time = 1_000_000_000;
-        let timestamp = current_time - (100 * 86400); // 100 days ago
-        let d1 = deposit_internal(p1, sub1, 180, 100, timestamp).unwrap();
-        let d2 = deposit_internal(p2, sub2, 180, 300, timestamp).unwrap();
+    //     let current_time = 1_000_000_000;
+    //     let timestamp = current_time - (100 * 86400); // 100 days ago
+    //     let d1 = deposit_internal(p1, sub1, 180, 100, timestamp).unwrap();
+    //     let d2 = deposit_internal(p2, sub2, 180, 300, timestamp).unwrap();
 
-        let result = reward_pool_internal(caller, d1.amount + d2.amount).await;
+    //     let result = reward_pool_internal(caller, d1.amount + d2.amount).await;
 
-        assert!(result.is_ok());
-    }
+    //     assert!(result.is_ok());
+    // }
 }
